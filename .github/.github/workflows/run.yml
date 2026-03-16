@@ -1,7 +1,12 @@
 
-  name: Run Script
+  name: Run codex_register
   on:
     workflow_dispatch:
+      inputs:
+        count:
+          description: "How many to run"
+          required: true
+          default: "10"
     push:
       branches: [ "main" ]
 
@@ -15,5 +20,4 @@
             python-version: "3.11"
         - run: pip install -r requirements.txt
           if: ${{ hashFiles('requirements.txt') != '' }}
-        - run: python codex_register.py
-          working-directory: .
+        - run: python codex_register.py --count ${{ inputs.count }} --workers 1
