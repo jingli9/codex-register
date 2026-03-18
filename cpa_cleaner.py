@@ -690,14 +690,14 @@ class CPAuthCleaner:
 def main():
     """主函数 - 适合GitHub Actions运行"""
     # 从环境变量获取配置
-    base_url = os.environ.get("CPA_BASE_URL")
-    token = os.environ.get("CPA_TOKEN")
+    base_url = os.environ.get("CPA_URL Token")
+    token = os.environ.get("MANAGEMENT_KEY")
     
     if not base_url or not token:
-        print("错误: 请设置环境变量 CPA_BASE_URL 和 CPA_TOKEN")
+        print("错误: 请设置环境变量 CPA_URL Token 和 MANAGEMENT_KEY")
         print("示例:")
-        print("  export CPA_BASE_URL=https://your-domain.com")
-        print("  export CPA_TOKEN=your-auth-token")
+        print("  export CPA_URL Token=https://your-domain.com")
+        print("  export MANAGEMENT_KEY=your-auth-token")
         sys.exit(1)
     
     # 可选配置
