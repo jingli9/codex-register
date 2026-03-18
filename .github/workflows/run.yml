@@ -1,4 +1,4 @@
-name: Run codex_register
+name: Run codex_注册机
 on:
   workflow_dispatch:
     inputs:
