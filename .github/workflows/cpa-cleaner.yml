@@ -5,6 +5,15 @@ on:
     # 每天凌晨2点运行
     - cron: '0 2 * * *'
   workflow_dispatch:  # 允许手动触发
+    inputs:
+      mode:
+        description: '运行模式 (full 或 quick)'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - quick
 
 jobs:
   cleanup:
@@ -18,21 +27,33 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: 'pip'
       
       - name: 安装依赖
         run: |
           pip install requests
       
+      - name: 测试网络连接
+        run: |
+          echo "测试网络连接..."
+          curl -I https://www.google.com || true
+      
       - name: 运行 CPA 清理器
+        id: cleanup
         env:
           CPA_BASE_URL: ${{ secrets.CPA_BASE_URL }}
           CPA_TOKEN: ${{ secrets.CPA_TOKEN }}
-          CPA_MODE: full  # 或 quick
+          CPA_MODE: ${{ github.event.inputs.mode || 'full' }}
           CPA_CONCURRENCY: 4
         run: |
           python cpa_cleaner.py
       
-      - name: 发送通知 (可选)
+      - name: 发送通知
         if: always()
         run: |
-          echo "清理完成 - 删除: ${{ steps.cleanup.outputs.deleted }}, 启用: ${{ steps.cleanup.outputs.enabled }}, 禁用: ${{ steps.cleanup.outputs.disabled }}"
+          echo "## CPA清理结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 状态: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 删除: ${{ steps.cleanup.outputs.deleted }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 启用: ${{ steps.cleanup.outputs.enabled }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 禁用: ${{ steps.cleanup.outputs.disabled }}" >> $GITHUB_STEP_SUMMARY
