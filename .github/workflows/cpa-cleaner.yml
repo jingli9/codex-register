@@ -1,4 +1,4 @@
-name: CPA 401 认证文件清理
+name: CPA 401 认证文件清理 (FULL模式)
 
 on:
   workflow_dispatch:  # 只保留手动触发
@@ -51,6 +51,8 @@ jobs:
           echo "| 项目 | 数量 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| 状态 | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 总文件数 | ${{ steps.cleanup.outputs.total }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Codex文件 | ${{ steps.cleanup.outputs.total_codex }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 删除 | ${{ steps.cleanup.outputs.deleted }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 启用 | ${{ steps.cleanup.outputs.enabled }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 禁用 | ${{ steps.cleanup.outputs.disabled }} |" >> $GITHUB_STEP_SUMMARY
