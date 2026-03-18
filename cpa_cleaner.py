@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import sys
+import traceback
 
 @dataclass
 class AuthFile:
@@ -54,6 +55,9 @@ class CPAuthCleaner:
         # 会话
         self.session = requests.Session()
         self.session.headers.update(self._get_headers())
+        
+        print(f"初始化清理器: {base_url}")
+        print(f"API端点: {self.auth_files_url}")
     
     def _get_headers(self) -> Dict[str, str]:
         """获取请求头"""
@@ -61,7 +65,8 @@ class CPAuthCleaner:
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-CN,zh;q=0.9",
             "referer": f"{self.base_url}/management.html",
-            "authorization": f"Bearer {self.token}"
+            "authorization": f"Bearer {self.token}",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         return headers
     
@@ -69,7 +74,8 @@ class CPAuthCleaner:
         """安全解析JSON"""
         try:
             return json.loads(text)
-        except:
+        except json.JSONDecodeError as e:
+            print(f"JSON解析失败: {e}, 内容: {text[:200]}")
             return None
     
     def _extract_file_name(self, item: Dict) -> str:
@@ -139,7 +145,8 @@ class CPAuthCleaner:
         elif isinstance(data, list):
             raw_files = data
         else:
-            raw_files = []
+            print(f"警告: 未知的数据格式: {type(data)}")
+            return files
         
         for item in raw_files:
             if not isinstance(item, dict):
@@ -162,25 +169,43 @@ class CPAuthCleaner:
     def fetch_all_files(self) -> List[AuthFile]:
         """获取所有文件"""
         try:
-            resp = self.session.get(self.auth_files_url)
+            print(f"请求URL: {self.auth_files_url}")
+            resp = self.session.get(self.auth_files_url, timeout=30)
+            print(f"响应状态码: {resp.status_code}")
+            
+            if resp.status_code == 401:
+                print("错误: 认证失败，请检查token是否正确")
+                print(f"响应内容: {resp.text[:500]}")
+                raise Exception("认证失败")
+            
             resp.raise_for_status()
             data = resp.json()
-            return self._normalize_files_payload(data)
+            files = self._normalize_files_payload(data)
+            print(f"成功获取 {len(files)} 个文件")
+            return files
+            
         except requests.exceptions.RequestException as e:
             print(f"获取文件列表失败: {e}")
             if hasattr(e, 'response') and e.response:
                 print(f"状态码: {e.response.status_code}")
-                print(f"响应: {e.response.text}")
+                print(f"响应: {e.response.text[:500]}")
+            raise
+        except Exception as e:
+            print(f"未知错误: {e}")
+            traceback.print_exc()
             raise
     
     def fetch_non_active_files(self) -> List[AuthFile]:
         """获取非活跃文件"""
         all_files = self.fetch_all_files()
-        return [f for f in all_files if f.status.lower() != "active"]
+        non_active = [f for f in all_files if f.status.lower() != "active"]
+        print(f"非活跃文件: {len(non_active)}")
+        return non_active
     
     def query_usage_by_auth_index(self, file_item: AuthFile) -> Tuple[bool, Optional[int], Optional[Dict], str]:
         """查询使用情况"""
         if not file_item.authIndex:
+            print(f"文件 {file_item.name} 缺少authIndex")
             return False, None, None, "missing authIndex"
         
         headers = {
@@ -199,12 +224,17 @@ class CPAuthCleaner:
         }
         
         try:
+            print(f"查询: {file_item.name} (authIndex: {file_item.authIndex})")
             resp = self.session.post(
                 self.api_call_url,
-                json=body
+                json=body,
+                timeout=30
             )
             
             data = self._safe_json(resp.text)
+            if not data:
+                return False, resp.status_code, None, resp.text
+            
             status_code = data.get("status_code") if data else None
             
             body_obj = None
@@ -222,8 +252,11 @@ class CPAuthCleaner:
             ok = resp.status_code == 200 and status_code == 200
             return ok, status_code, body_obj, body_text
             
+        except requests.exceptions.Timeout:
+            print(f"查询超时: {file_item.name}")
+            return False, None, None, "timeout"
         except requests.exceptions.RequestException as e:
-            print(f"查询失败: {e}")
+            print(f"查询失败: {file_item.name}, 错误: {e}")
             return False, None, None, str(e)
     
     def _normalize_used_percent(self, value: Any) -> Optional[float]:
@@ -385,6 +418,7 @@ class CPAuthCleaner:
                     self._mark_query_failed(file_item)
             except Exception as e:
                 print(f"处理文件 {file_item.name} 时出错: {e}")
+                traceback.print_exc()
                 self._mark_query_failed(file_item)
             return file_item
         
@@ -398,7 +432,7 @@ class CPAuthCleaner:
         # 统计结果
         stats = self.collect_stats(files)
         print(f"检查完成: 健康={stats['healthy']}, 无额度={stats['quota']}, "
-              f"失效={stats['failed']}, 异常={stats['unknown']}")
+              f"失效={stats['failed']}, 异常={stats['unknown']}, 可删除={stats['deletable']}")
         
         return files
     
@@ -439,14 +473,21 @@ class CPAuthCleaner:
         url = f"{self.auth_files_url}?name={requests.utils.quote(name)}"
         
         try:
-            resp = self.session.delete(url)
+            print(f"删除: {name}")
+            resp = self.session.delete(url, timeout=30)
+            
             if resp.status_code == 401:
                 print(f"删除 {name} 失败: 认证失败")
                 return False
             
             if resp.status_code == 200:
                 data = self._safe_json(resp.text)
-                return data is None or data.get("status") == "ok"
+                success = data is None or data.get("status") == "ok"
+                if success:
+                    print(f"成功删除: {name}")
+                else:
+                    print(f"删除 {name} 失败: {resp.text[:200]}")
+                return success
             else:
                 print(f"删除 {name} 失败: HTTP {resp.status_code}")
                 return False
@@ -461,7 +502,8 @@ class CPAuthCleaner:
         try:
             resp = self.session.patch(
                 self.auth_files_url,
-                json={"name": name, "disabled": disabled}
+                json={"name": name, "disabled": disabled},
+                timeout=30
             )
             
             if resp.status_code == 401:
@@ -470,7 +512,10 @@ class CPAuthCleaner:
             
             if resp.status_code == 200:
                 data = self._safe_json(resp.text)
-                return data is None or data.get("status") == "ok"
+                success = data is None or data.get("status") == "ok"
+                if success:
+                    print(f"成功{'禁用' if disabled else '启用'}: {name}")
+                return success
             
         except requests.exceptions.RequestException:
             pass
@@ -479,12 +524,16 @@ class CPAuthCleaner:
         try:
             resp = self.session.patch(
                 self.auth_files_status_url,
-                json={"name": name, "disabled": disabled}
+                json={"name": name, "disabled": disabled},
+                timeout=30
             )
             
             if resp.status_code == 200:
                 data = self._safe_json(resp.text)
-                return data is None or data.get("status") == "ok"
+                success = data is None or data.get("status") == "ok"
+                if success:
+                    print(f"成功{'禁用' if disabled else '启用'}: {name}")
+                return success
             else:
                 print(f"更新 {name} 状态失败: HTTP {resp.status_code}")
                 return False
@@ -521,7 +570,9 @@ class CPAuthCleaner:
                     success += 1
                 else:
                     failed += 1
+                time.sleep(0.2)  # 避免请求过快
             except Exception as e:
+                print(f"操作失败: {e}")
                 if "404" in str(e) or "405" in str(e) or "501" in str(e):
                     unsupported = True
                     break
@@ -582,12 +633,9 @@ class CPAuthCleaner:
                     if ok:
                         results["deleted"] += 1
                         deleted_set.add(item)
-                    time.sleep(0.1)  # 避免请求过快
+                    time.sleep(0.2)  # 避免请求过快
                 except Exception as e:
                     print(f"删除失败: {e}")
-        
-        # 从列表中移除已删除的文件
-        remaining_files = [f for f in files if f not in deleted_set]
         
         # 2. 启用健康的文件
         if enable_targets:
@@ -619,35 +667,41 @@ class CPAuthCleaner:
         2. 批量查询状态
         3. 清理401文件
         """
-        print("=" * 50)
-        print("开始CPA认证文件清理流程")
-        print("=" * 50)
+        print("=" * 60)
+        print("开始CPA认证文件完整清理流程")
+        print("=" * 60)
         
-        # 1. 获取所有文件
-        print("\n[1/3] 获取文件列表...")
-        files = self.fetch_all_files()
-        print(f"获取到 {len(files)} 个文件")
-        
-        codex_files = [f for f in files if self._supports_active_check(f)]
-        print(f"其中Codex文件: {len(codex_files)}")
-        
-        if not codex_files:
-            print("没有Codex文件，退出")
-            return {"deleted": 0, "enabled": 0, "disabled": 0}
-        
-        # 2. 批量查询状态
-        print("\n[2/3] 查询文件状态...")
-        files = self.query_files_batch(files)
-        
-        # 3. 清理401文件
-        print("\n[3/3] 执行清理...")
-        results = self.clean_401_files(files)
-        
-        print("\n" + "=" * 50)
-        print("清理流程完成")
-        print("=" * 50)
-        
-        return results
+        try:
+            # 1. 获取所有文件
+            print("\n[1/3] 获取文件列表...")
+            files = self.fetch_all_files()
+            print(f"获取到 {len(files)} 个文件")
+            
+            codex_files = [f for f in files if self._supports_active_check(f)]
+            print(f"其中Codex文件: {len(codex_files)}")
+            
+            if not codex_files:
+                print("没有Codex文件，退出")
+                return {"deleted": 0, "enabled": 0, "disabled": 0}
+            
+            # 2. 批量查询状态
+            print("\n[2/3] 查询文件状态...")
+            files = self.query_files_batch(files)
+            
+            # 3. 清理401文件
+            print("\n[3/3] 执行清理...")
+            results = self.clean_401_files(files)
+            
+            print("\n" + "=" * 60)
+            print("清理流程完成")
+            print("=" * 60)
+            
+            return results
+            
+        except Exception as e:
+            print(f"\n错误: {e}")
+            traceback.print_exc()
+            raise
     
     def run_quick_cleanup(self) -> Dict[str, Any]:
         """
@@ -656,55 +710,76 @@ class CPAuthCleaner:
         2. 批量查询状态
         3. 清理401文件
         """
-        print("=" * 50)
+        print("=" * 60)
         print("开始CPA快速清理流程")
-        print("=" * 50)
+        print("=" * 60)
         
-        # 1. 获取非活跃文件
-        print("\n[1/3] 获取非活跃文件列表...")
-        files = self.fetch_non_active_files()
-        print(f"获取到 {len(files)} 个非活跃文件")
-        
-        codex_files = [f for f in files if self._supports_active_check(f)]
-        print(f"其中Codex文件: {len(codex_files)}")
-        
-        if not codex_files:
-            print("没有Codex文件，退出")
-            return {"deleted": 0, "enabled": 0, "disabled": 0}
-        
-        # 2. 批量查询状态
-        print("\n[2/3] 查询文件状态...")
-        files = self.query_files_batch(files)
-        
-        # 3. 清理401文件
-        print("\n[3/3] 执行清理...")
-        results = self.clean_401_files(files)
-        
-        print("\n" + "=" * 50)
-        print("快速清理流程完成")
-        print("=" * 50)
-        
-        return results
+        try:
+            # 1. 获取非活跃文件
+            print("\n[1/3] 获取非活跃文件列表...")
+            files = self.fetch_non_active_files()
+            print(f"获取到 {len(files)} 个非活跃文件")
+            
+            codex_files = [f for f in files if self._supports_active_check(f)]
+            print(f"其中Codex文件: {len(codex_files)}")
+            
+            if not codex_files:
+                print("没有Codex文件，退出")
+                return {"deleted": 0, "enabled": 0, "disabled": 0}
+            
+            # 2. 批量查询状态
+            print("\n[2/3] 查询文件状态...")
+            files = self.query_files_batch(files)
+            
+            # 3. 清理401文件
+            print("\n[3/3] 执行清理...")
+            results = self.clean_401_files(files)
+            
+            print("\n" + "=" * 60)
+            print("快速清理流程完成")
+            print("=" * 60)
+            
+            return results
+            
+        except Exception as e:
+            print(f"\n错误: {e}")
+            traceback.print_exc()
+            raise
 
 
 def main():
     """主函数 - 适合GitHub Actions运行"""
-    # 从环境变量获取配置
-    base_url = os.environ.get("CPA_URL Token")
-    token = os.environ.get("MANAGEMENT_KEY")
-    
-    if not base_url or not token:
-        print("错误: 请设置环境变量 CPA_URL Token 和 MANAGEMENT_KEY")
-        print("示例:")
-        print("  export CPA_URL Token=https://your-domain.com")
-        print("  export MANAGEMENT_KEY=your-auth-token")
-        sys.exit(1)
-    
-    # 可选配置
-    concurrency = int(os.environ.get("CPA_CONCURRENCY", "4"))
-    mode = os.environ.get("CPA_MODE", "full")  # full 或 quick
+    exit_code = 0
     
     try:
+        # 从环境变量获取配置
+        base_url = os.environ.get("CPA_BASE_URL")
+        token = os.environ.get("CPA_TOKEN")
+        
+        print("=" * 60)
+        print("CPA 401认证文件清理器")
+        print("=" * 60)
+        
+        if not base_url or not token:
+            print("\n错误: 请设置环境变量 CPA_BASE_URL 和 CPA_TOKEN")
+            print("示例:")
+            print("  export CPA_BASE_URL=https://your-domain.com")
+            print("  export CPA_TOKEN=your-auth-token")
+            print("\n当前环境变量:")
+            print(f"  CPA_BASE_URL: {'已设置' if base_url else '未设置'}")
+            print(f"  CPA_TOKEN: {'已设置' if token else '未设置'}")
+            return 1
+        
+        # 可选配置
+        concurrency = int(os.environ.get("CPA_CONCURRENCY", "4"))
+        mode = os.environ.get("CPA_MODE", "full")  # full 或 quick
+        
+        print(f"\n配置信息:")
+        print(f"  Base URL: {base_url}")
+        print(f"  Token: {token[:10]}...{token[-5:] if len(token) > 15 else token}")
+        print(f"  并发数: {concurrency}")
+        print(f"  模式: {mode}")
+        
         cleaner = CPAuthCleaner(base_url, token, concurrency)
         
         if mode == "quick":
@@ -712,18 +787,28 @@ def main():
         else:
             results = cleaner.run_full_cleanup()
         
-        # 输出结果供GitHub Actions使用
-        print(f"\n::set-output name=deleted::{results['deleted']}")
-        print(f"::set-output name=enabled::{results['enabled']}")
-        print(f"::set-output name=disabled::{results['disabled']}")
+        # 输出结果
+        print(f"\n最终结果:")
+        print(f"  删除: {results['deleted']}")
+        print(f"  启用: {results['enabled']}")
+        print(f"  禁用: {results['disabled']}")
         
-        # 如果有删除操作，返回成功状态码
-        sys.exit(0)
+        # GitHub Actions 输出
+        if "GITHUB_OUTPUT" in os.environ:
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                f.write(f"deleted={results['deleted']}\n")
+                f.write(f"enabled={results['enabled']}\n")
+                f.write(f"disabled={results['disabled']}\n")
+            print("\n已写入GitHub Output")
         
     except Exception as e:
-        print(f"执行失败: {e}")
-        sys.exit(1)
+        print(f"\n执行失败: {e}")
+        traceback.print_exc()
+        exit_code = 1
+    
+    print(f"\n退出代码: {exit_code}")
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
